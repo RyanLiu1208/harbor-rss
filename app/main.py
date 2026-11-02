@@ -24,6 +24,7 @@ from .importers import parse_import, feed_url
 from .network import download
 from .content import (safe_html, plaintext, reader_html, entry_link, feed_body, discover_feed,
                       extract_body, substantial, build_translation, parse_translation, render_translation)
+from .content import translation_source, content_signature, translation_coverage
 from .images import image_urls, cached_image
 from .feed_sources import fetch_feed
 
@@ -77,7 +78,7 @@ def init_db():
         CREATE INDEX IF NOT EXISTS job_cache ON jobs(cache_key, status);
         ''')
         columns={r['name'] for r in c.execute('PRAGMA table_info(jobs)')}
-        for name in ('template','source_warning'):
+        for name in ('template','source_warning','source_kind'):
             if name not in columns:c.execute(f"ALTER TABLE jobs ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
         c.execute("UPDATE jobs SET status='queued' WHERE status='running'")
 
@@ -184,6 +185,9 @@ def translate_job(job_id):
             if cfg['base_url'].rstrip('/') != row['base_url'].rstrip('/'):
                 raise ValueError('API 地址已变更；请为当前服务重新创建翻译任务，避免把新 Key 发给旧服务')
             chunks, results = json.loads(row['chunks']), json.loads(row['results'])
+            if row['template']:
+                coverage=translation_coverage(chunks,results)
+                if coverage['first_bad'] is not None:results=results[:coverage['first_bad']]
             for chunk in chunks[len(results):]:
                 if stop.is_set():
                     return
@@ -211,6 +215,8 @@ def translate_job(job_id):
                 with db() as c:
                     c.execute('UPDATE jobs SET results=? WHERE id=?', (json.dumps(results, ensure_ascii=False), job_id))
             with db() as c:
+                if row['template'] and translation_coverage(chunks,results)['first_bad'] is not None:
+                    raise ValueError('仍有段落没有完整译文，请继续重试')
                 c.execute("UPDATE jobs SET status='done' WHERE id=?", (job_id,))
         except Exception as e:
             with db() as c:
@@ -310,6 +316,45 @@ class FeedInput(BaseModel):
     title: str = Field(default='', max_length=300)
     folder: str = Field(default='', max_length=300)
 
+class FolderRenameInput(BaseModel):
+    old_folder: str = Field(max_length=300)
+    new_folder: str = Field(min_length=1,max_length=300)
+
+def clean_folder(value):
+    parts=[s.strip() for s in value.split('/')]
+    if not all(parts):raise HTTPException(400,'文件夹名称不能包含空的层级')
+    return '/'.join(parts)
+
+@app.post('/api/folders/rename')
+def rename_folder(body: FolderRenameInput):
+    old=body.old_folder;new=clean_folder(body.new_folder)
+    with db() as c:
+        folders=[dict(r) for r in c.execute('SELECT id,folder FROM feeds')]
+        selected=[f for f in folders if f['folder']==old or (old and f['folder'].startswith(old+'/'))]
+        if not selected:raise HTTPException(404,'文件夹不存在')
+        if old==new:return {'updated':0}
+        if old and new.startswith(old+'/'):raise HTTPException(400,'不能把文件夹重命名为自己的子文件夹')
+        selected_ids={f['id'] for f in selected}
+        if any(f['id'] not in selected_ids and (f['folder']==new or f['folder'].startswith(new+'/')) for f in folders):raise HTTPException(409,'目标文件夹已存在，请使用移动订阅合并')
+        changes=[(new+(f['folder'][len(old):] if old else ''),f['id']) for f in selected]
+        if any(len(path)>300 for path,_ in changes):raise HTTPException(400,'文件夹路径过长')
+        c.executemany('UPDATE feeds SET folder=? WHERE id=?',changes)
+    return {'updated':len(changes)}
+
+class FolderMoveInput(BaseModel):
+    feed_ids: list[int] = Field(min_length=1,max_length=5000)
+    folder: str = Field(default='',max_length=300)
+
+@app.post('/api/folders/move')
+def move_feeds(body: FolderMoveInput):
+    folder=clean_folder(body.folder) if body.folder else ''
+    ids=set(body.feed_ids)
+    with db() as c:
+        existing={r['id'] for r in c.execute('SELECT id FROM feeds')}
+        if not ids.issubset(existing):raise HTTPException(404,'部分订阅已不存在，请刷新列表')
+        c.executemany('UPDATE feeds SET folder=? WHERE id=?',[(folder,fid) for fid in ids])
+    return {'updated':len(ids)}
+
 @app.post('/api/feeds')
 def add_feed(body: FeedInput):
     try:
@@ -389,7 +434,8 @@ def articles(feed_id: int | None = None, folder: str | None = None, view: str = 
     if feed_id is not None:
         clauses.append('a.feed_id=?'); params.append(feed_id)
     if folder is not None:
-        clauses.append('f.folder=?'); params.append(folder)
+        clauses.append("(f.folder=? OR substr(f.folder,1,length(?)+1)=?||'/')" if folder else 'f.folder=?')
+        params.extend([folder,folder,folder] if folder else [folder])
     if view == 'unread': clauses.append('a.read=0')
     if view == 'starred': clauses.append('a.starred=1')
     if q:
@@ -484,15 +530,17 @@ def translate(aid: int, body: TranslateInput):
     text = plaintext(html)
     if not text: raise HTTPException(400, '没有可翻译正文，请先抓取全文')
     template,chunks=build_translation(html)
-    cache = hashlib.sha256(json.dumps(['rich-v1',aid,html,body.language,cfg['model'],cfg['base_url']],ensure_ascii=False).encode()).hexdigest()
+    cache = hashlib.sha256(json.dumps(['rich-v2',aid,html,body.language,cfg['model'],cfg['base_url']],ensure_ascii=False).encode()).hexdigest()
     with db() as c:
         row = c.execute("SELECT id FROM jobs WHERE cache_key=? AND status IN ('done','queued','running') ORDER BY created_at DESC LIMIT 1", (cache,)).fetchone()
         if row and not body.force: return {'job_id': row['id'], 'cached': True}
         if c.execute("SELECT count(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0] >= 100:
             raise HTTPException(429, '翻译队列已满，请稍后重试')
         jid = uuid.uuid4().hex
-        c.execute('INSERT INTO jobs(id,article_id,cache_key,language,model,base_url,chunks,created_at,template,source_warning) VALUES(?,?,?,?,?,?,?,?,?,?)',
-                  (jid, aid, cache, body.language, cfg['model'], cfg['base_url'], json.dumps(chunks,ensure_ascii=False), int(time.time()),template,warning))
+        kind='feed' if body.use_feed_content or not a['full_content'] else 'full'
+        if kind=='feed' and not warning:warning='此任务仅翻译订阅提供的内容，可能只是摘要；全文翻译请使用「补全全文翻译」'
+        c.execute('INSERT INTO jobs(id,article_id,cache_key,language,model,base_url,chunks,created_at,template,source_warning,source_kind) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                  (jid, aid, cache, body.language, cfg['model'], cfg['base_url'], json.dumps(chunks,ensure_ascii=False), int(time.time()),template,warning,kind))
     return {'job_id': jid, 'cached': False}
 
 @app.get('/api/jobs/{jid}')
@@ -500,17 +548,27 @@ def get_job(jid: str):
     with db() as c: row = c.execute('SELECT * FROM jobs WHERE id=?', (jid,)).fetchone()
     if not row: raise HTTPException(404, '任务不存在')
     results = json.loads(row['results'])
+    chunks=json.loads(row['chunks'])
     translated_html=render_translation(row['template'],results) if row['template'] else ''
-    return {'id': jid, 'article_id': row['article_id'], 'status': row['status'], 'error': row['error'], 'completed': len(results),
-            'total': len(json.loads(row['chunks'])), 'translation': plaintext(translated_html) if row['template'] else '\n\n'.join(results),
+    source=translation_source(row['template']) if row['template'] else ''
+    a=article(row['article_id']);current=safe_html(a['full_content'] or a['content'],a['url'])
+    stale=content_signature(source)!=content_signature(current) if source else bool(a['full_content'])
+    scope=row['source_kind'] or ('full' if a['full_content'] and not stale else 'feed')
+    coverage=translation_coverage(chunks,results) if row['template'] else {'completed':len(results),'total':len(chunks),'first_bad':None if len(results)==len(chunks) else len(results)}
+    status='incomplete' if row['status']=='done' and coverage['first_bad'] is not None else row['status']
+    return {'id': jid, 'article_id': row['article_id'], 'status':status, 'error':row['error'], 'completed':len(results),
+            'total':len(chunks), 'translation': plaintext(translated_html) if row['template'] else '\n\n'.join(results),
             'translation_html':reader_html(translated_html,row['article_id']) if translated_html else '',
+            'source_html':reader_html(source,row['article_id']) if source else '', 'stale':stale,'source_kind':scope,
+            'source_characters':len(plaintext(source)),'current_characters':len(plaintext(current)),
+            'segments_completed':coverage['completed'],'segments_total':coverage['total'],
             'source_warning':row['source_warning'],'format':'html' if row['template'] else 'text','language': row['language']}
 
 @app.post('/api/jobs/{jid}/retry')
 def retry(jid: str):
+    job=get_job(jid)
+    if job['status'] not in ('failed','incomplete'):raise HTTPException(409,'仅失败或不完整的任务可以重试')
     with db() as c:
-        if not c.execute("SELECT id FROM jobs WHERE id=? AND status='failed'", (jid,)).fetchone():
-            raise HTTPException(409, '仅失败任务可以重试')
         c.execute("UPDATE jobs SET status='queued',error='' WHERE id=?", (jid,))
     return {'job_id': jid}
 

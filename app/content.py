@@ -1,5 +1,6 @@
 """Article normalization and translation with server-owned markup."""
 import json
+import hashlib
 import re
 from urllib.parse import urljoin, urlsplit, quote
 import bleach
@@ -139,12 +140,39 @@ def parse_translation(output, segments):
         if not isinstance(rows,list) or len(rows)!=len(expected):raise ValueError()
         result={r['id']:r['text'] for r in rows}
         if set(result)!=expected or any(not isinstance(t,str) or not t.strip() for t in result.values()):raise ValueError()
+        for segment in segments:
+            # Catch obvious one-line summaries of long paragraphs. Normal
+            # translation ratios vary by language, so keep this conservative.
+            if len(segment['text'])>=800 and len(result[segment['id']])<len(segment['text'])*0.12:
+                raise ValueError()
         return result
     except (ValueError,TypeError,KeyError):
         raise ValueError('模型未返回完整的段落译文，已保留进度，可继续重试')
 
+def translation_source(template):
+    soup=BeautifulSoup(template,'html.parser')
+    for span in list(soup.select('[data-harbor-text]')):span.unwrap()
+    return safe_html(str(soup))
+
+def content_signature(html):
+    soup=BeautifulSoup(html,'html.parser')
+    data=[soup.get_text(),[i.get('src','') for i in soup.find_all('img')],[a.get('href','') for a in soup.find_all('a')]]
+    return hashlib.sha256(json.dumps(data,ensure_ascii=False).encode()).hexdigest()
+
+def translation_coverage(chunks, results):
+    total=sum(len(group) for group in chunks)
+    completed=0;first_bad=None
+    for index,group in enumerate(chunks):
+        result=results[index] if index<len(results) else None
+        try:
+            parse_translation(json.dumps({'translations':[{'id':k,'text':v} for k,v in result.items()]}),group)
+            completed+=len(group)
+        except (ValueError,AttributeError,TypeError):
+            if first_bad is None:first_bad=index
+    return {'total':total,'completed':completed,'first_bad':first_bad}
+
 def render_translation(template, results):
-    soup=BeautifulSoup(template,'html.parser'); translated={k:v for group in results for k,v in group.items()}
+    soup=BeautifulSoup(template,'html.parser'); translated={k:v for group in results if isinstance(group,dict) for k,v in group.items() if isinstance(v,str) and v.strip()}
     for span in list(soup.select('[data-harbor-text]')):
         sid=span['data-harbor-text']
         if sid in translated:

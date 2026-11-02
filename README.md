@@ -6,7 +6,7 @@
 
 ## 功能
 
-- 桌面三栏阅读与手机阅读布局；搜索、未读状态、收藏、订阅文件夹。
+- 桌面三栏阅读与手机阅读布局；搜索、未读状态、收藏；嵌套订阅文件夹支持折叠、重命名和批量移动，折叠状态保存在当前浏览器。
 - RSS 2.0、Atom、JSON Feed；支持 RSSHub 输出的公开订阅 URL。
 - OPML / JSON / CSV / TXT 订阅导入，去重及 OPML 导出；嵌套文件夹往返保留。
 - 后台定时抓取，单源失败不影响其他订阅；订阅管理显示抓取错误、支持单源重试及地址编辑；支持网页中声明的 RSS / Atom 订阅自动发现。
@@ -110,6 +110,12 @@ https://example.com/feed.xml,示例订阅,科技/AI
 
 TXT：每行一个完整 HTTP/HTTPS URL，空行和 `#` 开头的注释忽略。导入文件最大 4 MB，单次最多 5000 个订阅。任意无效条目会使该次导入整体失败，避免不明确的部分导入。OPML 的嵌套目录用 `/` 表示，因此文件夹名本身不要使用 `/`。
 
+## 整理订阅
+
+左侧按 OPML 原有层级显示文件夹，首次默认收起。点击文件夹行展开/折叠，顶部「⊞ / ⊟」展开或收起全部。文件夹右侧「▤」查看其中及子文件夹的文章，「✎」重命名，名称变更会同步到子文件夹与 OPML 导出。单个订阅旁的「✎」可以修改名称或所属文件夹。
+
+「整理订阅 / 设置与迁移 → 订阅管理」可勾选多个订阅，填写目标文件夹后一起移动；输入新名字会创建分组，留空移到未分组。操作保留文章 ID、收藏、已读和译文。文件夹重命名遇到已有同名目标会拒绝，合并请使用移动订阅。
+
 ## DeepSeek 全文翻译
 
 打开「设置与迁移 → AI 翻译」：
@@ -127,7 +133,7 @@ TXT：每行一个完整 HTTP/HTTPS URL，空行和 `#` 开头的注释忽略。
 
 每组正文文字最多约 4500 字符，逐段保存结果；遇到请求异常自动重试最多 3 次。模型返回非 `stop` 结束状态会被视为不完整译文，任务失败后可继续重试；此前成功的段落不会再次调用 API。进程退出可能发生在服务商已经计费、但本地尚未保存该段结果之间，这种情况下恢复会重复该段调用。
 
-全文内容、语言、模型、API 基础地址相同且已有成功任务时复用缓存。译文保留段落、标题、列表、表格、图片和链接。代码块、行内代码不会发给模型，保持原样；仅翻译正文及图片说明文字，模型返回的内容始终按纯文本插回排版，不执行模型 HTML。旧版纯文本译文仍可查看，点击「重新翻译」会新建保留图文的任务。原文仍可随时查看。AI 译文质量和内容完整性应按需要核对。
+全文内容、语言、模型、API 基础地址相同且已有成功任务时复用缓存。译文保留段落、标题、列表、表格、图片和链接。代码块、行内代码不会发给模型，保持原样；仅翻译正文及图片说明文字，模型返回的内容始终按纯文本插回排版，不执行模型 HTML。旧版纯文本译文仍可查看，点击「重新翻译」会新建保留图文的任务。原文仍可随时查看。对照阅读使用该任务实际翻译的原文快照；若任务仅翻译了摘要，或后来正文已经更新，会标明未覆盖当前全文，并提供「补全全文翻译」。只有全部段落完整返回后才报告完成，明显缩写成长段摘要的模型结果会重试。AI 译文质量仍应按需要核对。
 
 翻译只在点击按钮或调用接口后发生，会把文章正文发送至你填写的服务地址并产生该服务的 API 费用。没有预置 Key，不会使用 Folo 的 AI 账户。
 
@@ -165,6 +171,8 @@ curl "$HARBOR_URL/api/jobs/返回的job_id" \
 | `DELETE /api/feeds/{id}` | 删除订阅及文章、翻译任务 |
 | `POST /api/import` | `{ "content": "OPML/JSON/CSV/TXT 字符串" }` |
 | `GET /api/export` | OPML 下载 |
+| `POST /api/folders/rename` | `{ "old_folder": "Articles", "new_folder": "文章" }`，批量重命名子树 |
+| `POST /api/folders/move` | `{ "feed_ids": [1, 2], "folder": "工作/科技" }`，批量分组 |
 | `POST /api/refresh` | 后台刷新所有订阅 |
 | `GET /api/articles` | `feed_id, folder, view=all/unread/starred, q, offset, limit` |
 | `GET /api/articles/{id}` | 正文、提取后的全文和最近翻译任务 ID |
@@ -172,7 +180,7 @@ curl "$HARBOR_URL/api/jobs/返回的job_id" \
 | `GET /api/articles/{id}/image?url=...` | 仅代理当前文章的图片，认证、缓存、SSRF 检查 |
 | `POST /api/articles/{id}/extract` | 抓取并缓存网页正文 |
 | `POST /api/articles/{id}/translate` | `{ "language": "简体中文", "force": false, "use_feed_content": false }` |
-| `GET /api/jobs/{id}` | `queued/running/done/failed`、进度、纯文本译文及 `translation_html` 图文译文 |
+| `GET /api/jobs/{id}` | `queued/running/done/failed/incomplete`、段落覆盖进度、`stale`、原文快照及图文译文 |
 | `POST /api/jobs/{id}/retry` | 继续失败任务的剩余段落 |
 | `GET /api/settings` | 获取配置；仅返回是否存在 Key，不返回 Key |
 | `PUT /api/settings` | `base_url, model, language, api_key`；Key 留空保留 |
@@ -205,7 +213,7 @@ python -m pytest -q
 
 运行环境为 Python 3.12+。前端为原生 JavaScript/CSS，无 npm 构建步骤，无远程字体和运行时 CDN 依赖。测试使用临时数据库和模拟翻译服务，不需要真实 API Key。
 
-已在 Windows Docker Desktop（WSL 2 / Linux amd64）实际构建启动，51 项测试通过；验证了少数派、阮一峰博客、Hacker News 的真实抓取、网页登录、搜索、收藏、中文网页全文提取，以及容器重启后的数据保留。GitHub Actions 也提供 Linux 上的测试、镜像构建和容器健康检查。图文翻译已通过真实 API 调用和浏览器显示验证；NAS 实机部署及 ARM 平台尚未验证。部分外站可能出现网络超时，抓取器会尝试多个已验证公网 IP。
+已在 Windows Docker Desktop（WSL 2 / Linux amd64）实际构建启动，57 项后端测试和 3 项导航测试通过；验证了少数派、阮一峰博客、Hacker News 的真实抓取、网页登录、搜索、收藏、中文网页全文提取，以及容器重启后的数据保留。GitHub Actions 也提供 Linux 上的测试、镜像构建和容器健康检查。图文翻译已通过真实 API 调用和浏览器显示验证；NAS 实机部署及 ARM 平台尚未验证。部分外站可能出现网络超时，抓取器会尝试多个已验证公网 IP。
 
 ## 参考与许可
 

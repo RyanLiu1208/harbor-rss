@@ -2,7 +2,7 @@
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state = {feeds: [], items: [], view: 'all', feed: null, folder: null, q: '', article: null, job: null, mode: 'original', listRequest: 0, articleRequest: 0, editingFeed: null};
+const state = {feeds: [], items: [], view: 'all', feed: null, folder: null, q: '', article: null, job: null, mode: 'original', listRequest: 0, articleRequest: 0, editingFeed: null, selectedFeeds: new Set(), renameFolder: null};
 let toastTimer, searchTimer, pollTimer;
 function toast(message) { $('#toast').textContent = message; $('#toast').classList.remove('hidden'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').classList.add('hidden'), 5000); }
 async function api(path, options = {}) {
@@ -21,10 +21,36 @@ async function loadFeeds() {
   state.feeds = await api('/feeds');
   $('#unread-count').textContent = state.feeds.reduce((n,f) => n + f.unread, 0) || '';
   const selected=state.feeds.find(f=>f.id===state.feed); $('#feed-notice').textContent=selected?.error || ''; $('#feed-notice').classList.toggle('hidden',!selected?.error);
-  const groups = new Map();
-  state.feeds.forEach(f => { if (!groups.has(f.folder)) groups.set(f.folder, []); groups.get(f.folder).push(f); });
-  $('#feeds').innerHTML = state.feeds.length ? [...groups].map(([folder, feeds]) => `${folder ? `<div class="folder-label">⌄ ${esc(folder)}</div>` : ''}${feeds.map(f => `<button class="feed-row ${state.feed === f.id ? 'active' : ''}" data-feed="${f.id}" title="${esc(f.error || f.url)}"><span class="feed-avatar">${esc((f.title || '订').slice(0,1))}</span><span class="feed-name">${esc(f.title || f.url)}</span><small class="${f.error ? 'feed-error' : ''}">${f.error ? '!' : f.unread || ''}</small></button>`).join('')}`).join('') : '<div class="empty-list">还没有订阅<br>导入你的阅读世界 ↓</div>';
-  $$('#feeds [data-feed]').forEach(el => el.onclick = () => selectView('all', Number(el.dataset.feed)));
+  if(state.feed) $('#view-title').textContent=state.feeds.find(f=>f.id===state.feed)?.title || '订阅文章';
+  else if(state.folder!==null) $('#view-title').textContent=state.folder || '未分组';
+  renderFeedTree();
+}
+let openFolders;
+try {openFolders=new Set(JSON.parse(localStorage.getItem('harbor.folderOpen.v1') || '[]'));} catch {openFolders=new Set();}
+function saveFolders() {try {localStorage.setItem('harbor.folderOpen.v1',JSON.stringify([...openFolders]));} catch {}}
+function openFeedEditor(id) {
+  const feed=state.feeds.find(f=>f.id===id);if(!feed)return;
+  state.editingFeed=id;$('#add-dialog h2').textContent='编辑订阅名称与文件夹';
+  ['url','title','folder'].forEach(k=>$('#add-form').elements[k].value=feed[k]);$('#add-dialog').showModal();
+}
+function renderFeedTree() {
+  const tree=HarborFolders.folderTree(state.feeds),scroll=$('#feeds').scrollTop;
+  function feedRow(f) {return `<div class="feed-item"><button class="feed-row ${state.feed===f.id?'active':''}" data-feed="${f.id}" title="${esc(f.error || f.url)}"><span class="feed-avatar">${esc((f.title || '订').slice(0,1))}</span><span class="feed-name">${esc(f.title || f.url)}</span><small class="${f.error?'feed-error':''}">${f.error?'!':f.unread || ''}</small></button><button class="feed-edit" data-feed-edit="${f.id}" title="重命名或移动订阅" aria-label="编辑 ${esc(f.title || f.url)}">✎</button></div>`;}
+  function render(node) {const path=encodeURIComponent(node.path);return `<details class="folder-group" data-path="${path}" ${openFolders.has(node.path)?'open':''}><summary title="${esc(node.path || '未分组')} · ${node.count} 个订阅"><span class="folder-chevron">›</span><span class="folder-title">${esc(node.name)}</span><small>${node.count}</small>${node.errors?'<span class="folder-error" title="含抓取失败的订阅">!</span>':''}<button data-folder-browse="${path}" title="查看文件夹文章" aria-label="查看 ${esc(node.name)} 的文章">▤</button><button data-folder-rename="${path}" title="重命名文件夹" aria-label="重命名 ${esc(node.name)}">✎</button></summary><div class="folder-children">${[...node.children.values()].map(render).join('')}${node.feeds.map(feedRow).join('')}</div></details>`;}
+  $('#feeds').innerHTML=state.feeds.length ? [...tree.children.values()].map(render).join('') : '<div class="empty-list">还没有订阅<br>导入你的阅读世界 ↓</div>';
+  $('#feeds').scrollTop=scroll;
+  $$('#feeds details').forEach(d=>d.addEventListener('toggle',()=>{if(!d.isConnected)return;const path=decodeURIComponent(d.dataset.path);if(d.open)openFolders.add(path);else openFolders.delete(path);saveFolders();updateFoldButton();}));
+  $$('#feeds [data-feed]').forEach(b=>b.onclick=()=>selectView('all',Number(b.dataset.feed)).catch(e=>toast(e.message)));
+  $$('[data-feed-edit]').forEach(b=>b.onclick=()=>openFeedEditor(Number(b.dataset.feedEdit)));
+  $$('[data-folder-browse]').forEach(b=>b.onclick=e=>{e.preventDefault();e.stopPropagation();selectFolder(decodeURIComponent(b.dataset.folderBrowse)).catch(e=>toast(e.message));});
+  $$('[data-folder-rename]').forEach(b=>b.onclick=e=>{e.preventDefault();e.stopPropagation();state.renameFolder=decodeURIComponent(b.dataset.folderRename);$('#folder-name').value=state.renameFolder.split('/').pop() || '';$('#folder-rename-info').textContent=state.renameFolder ? '同时更新其中的订阅与子文件夹。' : '将未分组订阅一起放入新文件夹。';$('#folder-dialog').showModal();});
+  updateFoldButton();
+}
+function updateFoldButton() {const open=$$('#feeds details').some(d=>d.open);$('#fold-all').textContent=open?'⊟':'⊞';$('#fold-all').title=open?'收起全部文件夹':'展开全部文件夹';$('#fold-all').setAttribute('aria-label',$('#fold-all').title);}
+async function selectFolder(folder) {
+  state.feed=null;state.folder=folder;state.view='all';$('#view-title').textContent=folder || '未分组';
+  $$('#views button').forEach(b=>b.classList.remove('active'));await loadArticles();
+
 }
 async function selectView(view, feed = null) {
   state.view = view; state.feed = feed; state.folder = null;
@@ -37,6 +63,7 @@ async function loadArticles(append = false) {
   const req = ++state.listRequest;
   const params = new URLSearchParams({view:state.view,q:state.q,offset:append ? state.items.length : 0});
   if (state.feed) params.set('feed_id', state.feed);
+  if (state.folder!==null) params.set('folder',state.folder);
   const data = await api('/articles?' + params);
   if (req !== state.listRequest) return;
   state.items = append ? [...state.items, ...data.items] : data.items;
@@ -52,7 +79,7 @@ async function openArticle(id) {
   const req = ++state.articleRequest;
   const a = await api('/articles/' + id);
   if (req !== state.articleRequest) return;
-  clearTimeout(pollTimer); state.article = a; state.job = null; state.mode = 'original';
+  clearTimeout(pollTimer); state.article = a; state.job = null; state.jobSourceHTML=null; state.mode = 'original';
   $('#app').classList.add('reading'); $('#reader-empty').classList.add('hidden'); $('#reader-body').classList.remove('hidden');
   $('#article-title').textContent = a.title; $('#article-meta').textContent = a.feed_title;
   $('#article-byline').textContent = `${a.author ? a.author + ' · ' : ''}${new Date(a.published * 1000).toLocaleString('zh-CN')} · ${Math.max(1, Math.ceil((a.full_content || a.content).length / 1000))} 分钟阅读`;
@@ -62,14 +89,16 @@ async function openArticle(id) {
   $('#star').textContent = a.starred ? '★' : '☆'; updateMode(); $('#reader-body').scrollTop = 0;
   await api('/articles/' + id, {method:'PATCH',body:JSON.stringify({read:true})});
   const local = state.items.find(a => a.id === id); if (local) local.read = 1; renderList(); await loadFeeds();
-  if (state.article?.id === id && a.translation_job) { state.job = a.translation_job; pollJob(a.translation_job, id); }
+
   if (!a.full_content && (new DOMParser().parseFromString(a.content,'text/html').body.textContent || '').length<600) {
     $('#article-notice').textContent='正在获取原网页图文正文…'; $('#article-notice').classList.remove('hidden');
     try { const data=await post('/articles/'+id+'/extract'); if(state.article?.id!==id)return; if(data.source==='web')a.full_content=data.content; $('#content').innerHTML=data.content; $('#article-notice').textContent=data.warning || ''; $('#article-notice').classList.toggle('hidden',!data.warning); }
     catch(e) { if(state.article?.id===id) $('#article-notice').textContent='原网页未能提取：'+e.message+'。仍可阅读或翻译订阅中已有的内容。'; }
   }
+  if (state.article?.id===id && !state.job && a.translation_job) {state.job=a.translation_job;pollJob(a.translation_job,id);}
 }
 function updateMode() {
+  if(state.article) $('#content').innerHTML=state.mode==='both' && state.jobSourceHTML ? state.jobSourceHTML : state.article.full_content || state.article.content;
   $('#content').classList.toggle('hidden', state.mode === 'translation');
   $('#translation').classList.toggle('hidden', state.mode === 'original');
   $('#content-grid').classList.toggle('both', state.mode === 'both');
@@ -80,14 +109,17 @@ async function pollJob(jid, aid) {
     const job = await api('/jobs/' + jid);
     if (state.article?.id !== aid || state.job !== jid) return;
     $('#translation-status').classList.remove('hidden');
-    $('#translation-status').textContent = {queued:'翻译任务已排队，可继续阅读其他文章。',running:`正在翻译全文 · ${job.completed} / ${job.total} 段`,done:`翻译完成 · ${job.total} 段 · ${job.language}`,failed:`翻译未完成：${job.error}（已保存 ${job.completed} 段）`}[job.status];
+    $('#translation-status').textContent = {incomplete:'译文存在缺失段落，请继续补全',queued:'翻译任务已排队，可继续阅读其他文章。',running:`正在翻译全文 · ${job.completed} / ${job.total} 段`,done:`${job.source_kind==='full'?'全文翻译完成':'订阅内容翻译完成'} · ${job.segments_completed} / ${job.segments_total} 段落 · ${job.language}`,failed:`翻译未完成：${job.error}（已保存 ${job.completed} 段）`}[job.status];
+    state.jobSourceHTML=job.source_html || null;
     if (job.translation_html) { $('#translation').innerHTML=job.translation_html; $('#translation').classList.add('rich'); } else { $('#translation').textContent=job.translation; $('#translation').classList.remove('rich'); }
     if (job.format==='html' && ['queued','running','failed'].includes(job.status)) $('#translation-status').textContent+=' · 未完成的段落暂时显示原文';
     if (job.source_warning) $('#translation-status').textContent+=' · '+job.source_warning;
     if (job.format==='text' && job.status==='done') $('#translation-status').textContent+=' · 这是旧版纯文本译文，点击「重新翻译」可保留图文。';
     if (job.translation) $('#reading-tabs').classList.remove('hidden');
-    if (job.status === 'done') { state.mode = 'translation'; updateMode(); }
-    if (job.status === 'failed') {
+    if (job.stale) { $('#translation-status').textContent='这份译文对应旧摘要或旧正文，未覆盖当前全文。点击「补全全文翻译」继续。'; const complete=document.createElement('button');complete.textContent='补全全文翻译';complete.onclick=()=>beginTranslation(false,false);$('#translation-status').append(complete); }
+    if (job.status === 'done') state.mode='translation';
+    updateMode();
+    if (['failed','incomplete'].includes(job.status)) {
       const btn = document.createElement('button'); btn.textContent = '继续重试';
       btn.onclick = async () => { try { await post('/jobs/' + jid + '/retry'); pollJob(jid, aid); } catch(e) { toast(e.message); } };
       $('#translation-status').append(btn);
@@ -108,8 +140,10 @@ function changeTab(tab) {
   if (tab === 'manage') renderManage();
 }
 function renderManage() {
-  $('#manage-feeds').innerHTML = state.feeds.map(f => `<div class="manage-row"><div><strong>${esc(f.title || f.url)}</strong><small>${esc(f.url)}</small>${f.error ? `<small class="feed-error">${esc(f.error)}</small>` : ''}</div><button data-edit="${f.id}">编辑</button><button data-retry="${f.id}">重试</button><button data-delete="${f.id}">删除</button></div>`).join('') || '<p>还没有订阅</p>';
-  $$('[data-edit]').forEach(b=>b.onclick=()=> { const f=state.feeds.find(f=>f.id===Number(b.dataset.edit)); state.editingFeed=f.id; $('#add-dialog h2').textContent='编辑订阅地址'; ['url','title','folder'].forEach(k=>$('#add-form').elements[k].value=f[k]); $('#add-dialog').showModal(); });
+  $('#manage-feeds').innerHTML = state.feeds.map(f => `<div class="manage-row"><input class="feed-select" type="checkbox" data-select-feed="${f.id}" ${state.selectedFeeds.has(f.id)?'checked':''} aria-label="选择 ${esc(f.title || f.url)}"><div><strong>${esc(f.title || f.url)}</strong><small>${esc(f.url)}</small>${f.error ? `<small class="feed-error">${esc(f.error)}</small>` : ''}</div><button data-edit="${f.id}">编辑</button><button data-retry="${f.id}">重试</button><button data-delete="${f.id}">删除</button></div>`).join('') || '<p>还没有订阅</p>';
+  $$('[data-edit]').forEach(b=>b.onclick=()=>openFeedEditor(Number(b.dataset.edit)));
+  $('#folder-options').innerHTML=HarborFolders.paths(HarborFolders.folderTree(state.feeds)).filter(Boolean).map(path=>`<option value="${esc(path)}"></option>`).join('');
+  $$('[data-select-feed]').forEach(b=>b.onchange=()=>{const id=Number(b.dataset.selectFeed);if(b.checked)state.selectedFeeds.add(id);else state.selectedFeeds.delete(id);updateSelection();});updateSelection();
   $$('[data-retry]').forEach(b=>b.onclick=async()=>{try{await post('/feeds/'+b.dataset.retry+'/refresh');toast('正在重新抓取该订阅');}catch(e){toast(e.message);}});
   $$('[data-delete]').forEach(b => b.onclick = async () => {
     if (!confirm('确定删除这个订阅及其文章、收藏和译文？')) return;
@@ -120,6 +154,12 @@ $('#login-form').onsubmit = async e => { e.preventDefault(); try { await post('/
 $('#add').onclick = () => { state.editingFeed=null; $('#add-form').reset(); $('#add-dialog h2').textContent='添加一份好内容'; $('#add-dialog').showModal(); };
 $$('[data-close]').forEach(b => b.onclick = () => b.closest('dialog').close());
 $$('#views button').forEach(b => b.onclick = () => selectView(b.dataset.view).catch(e => toast(e.message)));
+$('#organize').onclick=()=>settings('manage').catch(e=>toast(e.message));
+$('#fold-all').onclick=()=>{const collapse=$$('#feeds details').some(d=>d.open);openFolders=collapse?new Set():new Set(HarborFolders.paths(HarborFolders.folderTree(state.feeds)));saveFolders();renderFeedTree();};
+$('#folder-rename-form').onsubmit=async e=>{e.preventDefault();const old=state.renameFolder;const parent=old.includes('/')?old.slice(0,old.lastIndexOf('/')+1):'';const target=parent+$('#folder-name').value.trim();try{await post('/folders/rename',{old_folder:old,new_folder:target});openFolders=new Set([...openFolders].map(p=>HarborFolders.renamePath(p,old,target)));if(state.folder!==null)state.folder=HarborFolders.renamePath(state.folder,old,target);saveFolders();$('#folder-dialog').close();await loadFeeds();await loadArticles();toast('文件夹名称已更新');}catch(e){toast(e.message);}};
+function updateSelection() {$('#selection-count').textContent='已选 '+state.selectedFeeds.size;$('#select-all-feeds').checked=state.feeds.length>0&&state.selectedFeeds.size===state.feeds.length;$('#select-all-feeds').indeterminate=state.selectedFeeds.size>0&&state.selectedFeeds.size<state.feeds.length;}
+$('#select-all-feeds').onchange=e=>{state.selectedFeeds=e.target.checked?new Set(state.feeds.map(f=>f.id)):new Set();renderManage();};
+$('#move-selected').onclick=async()=>{if(!state.selectedFeeds.size)return toast('请先勾选要移动的订阅');try{const result=await post('/folders/move',{feed_ids:[...state.selectedFeeds],folder:$('#move-folder').value.trim()});state.selectedFeeds.clear();await loadFeeds();renderManage();await loadArticles();toast('已移动 '+result.updated+' 个订阅');}catch(e){toast(e.message);}};
 $('#settings').onclick = () => settings().catch(e => toast(e.message));
 ['#empty-import','#import-short'].forEach(s => $(s).onclick = () => settings('migration').catch(e => toast(e.message)));
 $$('.settings-tabs button').forEach(b => b.onclick = () => changeTab(b.dataset.tab));
