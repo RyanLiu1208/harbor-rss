@@ -1,0 +1,36 @@
+# Optional RSSHub backend. No host ports are exposed.
+# docker compose -f compose.yaml -f compose.rsshub.yaml up -d --build
+services:
+  harbor-rss:
+    environment:
+      RSSHUB_BASE_URL: http://rsshub:1200
+      RSSHUB_INTERNAL_URL: http://rsshub:1200
+    depends_on:
+      rsshub:
+        condition: service_healthy
+  rsshub:
+    image: ghcr.io/diygod/rsshub@sha256:312f10f6996c83b72d9f65f31427f72c45214f0cd7e67f8b205fd20796119366
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      CACHE_TYPE: memory
+      CACHE_EXPIRE: "1800"
+      NODE_OPTIONS: --max-old-space-size=512
+      # The generic unsafe-domain transformer is deliberately not enabled.
+      ALLOW_USER_SUPPLY_UNSAFE_DOMAIN: "false"
+    mem_limit: 1g
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:1200/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

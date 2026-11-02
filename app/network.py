@@ -1,27 +1,35 @@
 """Bounded HTTP downloads, with DNS pinned to a validated public address."""
 import ipaddress
+import os
 import socket
 from urllib.parse import urljoin, urlsplit
 import httpx
 
 MAX_BYTES = 8 * 1024 * 1024
 
-def public_target(url):
+def public_target(url, *, trusted_origin=None):
     p = urlsplit(url)
     if p.scheme not in ('http', 'https') or not p.hostname or p.username or p.password:
         raise ValueError('仅允许不含用户名密码的 HTTP / HTTPS 地址')
     port = p.port or (443 if p.scheme == 'https' else 80)
     addresses = socket.getaddrinfo(p.hostname, port, type=socket.SOCK_STREAM)
     ips = list(dict.fromkeys(a[4][0] for a in addresses))
-    if not ips or any(not ipaddress.ip_address(ip).is_global for ip in ips):
+    configured=os.getenv('RSSHUB_INTERNAL_URL','').rstrip('/')
+    trusted=False
+    if trusted_origin and configured and trusted_origin.rstrip('/')==configured:
+        t=urlsplit(configured)
+        trusted=(p.scheme,p.hostname,port)==(t.scheme,t.hostname,t.port or (443 if t.scheme=='https' else 80)) and not t.username and not t.password
+    if not ips or any(not ipaddress.ip_address(ip).is_global and not (trusted and ipaddress.ip_address(ip).is_private and not (ipaddress.ip_address(ip).is_loopback or ipaddress.ip_address(ip).is_link_local or ipaddress.ip_address(ip).is_reserved or ipaddress.ip_address(ip).is_unspecified)) for ip in ips):
         raise ValueError('为保护 NAS，禁止访问本机、局域网或保留 IP 地址')
     # NAS IPv6 connectivity is often incomplete; try IPv4 first, then remaining
     # validated addresses. Never fall back to an unvalidated DNS lookup.
     return p, sorted(ips, key=lambda ip: ipaddress.ip_address(ip).version)
 
-def download(url, *, method='GET', headers=None, json=None, limit=MAX_BYTES):
-    for _ in range(6):
-        p, ips = public_target(url)
+def download(url, *, method='GET', headers=None, json=None, limit=MAX_BYTES, trusted_origin=None):
+    for hop in range(6):
+        # Only the explicitly configured RSSHub initial request may use its
+        # private Docker address. Redirects and all other fetches stay public.
+        p, ips = public_target(url, trusted_origin=trusted_origin if hop==0 else None)
         host = p.hostname.encode('idna').decode()
         host_header = f'[{host}]' if ':' in host else host
         if p.port:

@@ -98,6 +98,7 @@ async function pollJob(jid, aid) {
 async function settings(tab = 'ai') {
   const cfg = await api('/settings'); const form = $('#ai-form');
   ['base_url','model','language'].forEach(k => form.elements[k].value = cfg[k]); form.elements.api_key.value = '';
+  $('#rsshub-state').textContent=cfg.rsshub_enabled ? '✓ 自建 RSSHub 已启用，rsshub.app 订阅会自动使用自己的实例。' : '使用 RSSHub 公共实例；若持续返回 403，可按 README 启用自建 RSSHub。';
   $('#key-state').textContent = cfg.has_key ? '✓ 已配置 Key；留空保留' : '尚未配置 API Key';
   changeTab(tab); $('#settings-dialog').showModal();
 }

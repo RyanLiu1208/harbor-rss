@@ -63,6 +63,24 @@ docker compose start
 
 同时安全保管 `.env`。恢复时停止容器，将备份复制到 `/data` 并确保 UID 10001 可读写后启动。`secret.key` 是解密网页中保存的 API Key 所必需的，不能只备份数据库。不要执行 `docker compose down -v`，它会删除数据卷。
 
+## 修复 RSSHub 公共实例 HTTP 403
+
+`rsshub.app` 是公共演示服务，可能因运营成本限制阅读器访问。项目提供独立 RSSHub 服务，不发布额外端口，保留原订阅地址、订阅 ID 和已有文章：
+
+```sh
+docker compose -f compose.yaml -f compose.rsshub.yaml up -d --build
+```
+
+之后在订阅管理中重试失败订阅，或刷新全部订阅。以后更新、重建也使用这两个 Compose 文件。普通单容器部署方式仍可使用；需要 RSSHub 的订阅推荐启用这个可选服务。RSSHub 使用内存缓存，额外容器上限 1 GB，实际用量取决于路由。镜像固定到本次验证的官方 GHCR digest。
+
+- `rsshub.app` 的常规路由自动通过自建实例获取，不改动 OPML 中的原始 URL。
+- `/rsshub/transform/html/...` 类型的订阅直接由泊读按原规则抓取公开页面；保留公网地址检查，不启用 RSSHub 的 `ALLOW_USER_SUPPLY_UNSAFE_DOMAIN`。列表项描述会导入，详细正文在阅读时按需提取。
+- 也可以通过容器环境变量 `RSSHUB_BASE_URL` 指定自己维护的公网 RSSHub 基础地址。私网例外只由部署环境 `RSSHUB_INTERNAL_URL` 授予，网页输入的 URL 不会获得该例外；重定向仍必须为公网。
+- 自建实例解决公共演示服务的访问限制；原站自身 403、需要登录或 Cookie、路由 404、网页选择器失效等情况仍会明确报错，不会清除历史文章。
+- 目前没有为 X/Twitter 等需要额外授权的路由配置账户 Cookie，也不自动使用浏览器登录状态。
+
+RSSHub 官方部署参考：[官方 Compose 配置](https://github.com/DIYgod/RSSHub/blob/master/docker-compose.yml)。
+
 ## 从 Folo 迁移
 
 1. 在 Folo 中导出 OPML（官方项目支持 OPML 导入导出；不同版本入口位置可能变化）。
@@ -168,7 +186,7 @@ curl "$HARBOR_URL/api/jobs/返回的job_id" \
 - 只运行 **一个 Uvicorn worker、一个容器副本**。后台任务在进程内运行，状态持久化在 SQLite；增加 worker 会导致重复抓取或翻译。
 - 每个源每次最多处理最近 500 篇文章；JSON Feed 条目的日期暂按首次抓取时间保存。没有自动删除旧文章，长期使用应检查数据卷空间。
 - 翻译同时执行一个任务，队列最多 100 个待处理任务；串行抓取，海量订阅首次同步会较慢。
-- 不访问私有地址、回环地址、链路本地地址和 Tailscale CGNAT 地址。自建内网 RSSHub/API 不能直接连接；需要使用可访问的公网 HTTPS 服务。本版本不提供放开内网限制的开关。
+- 不访问私有地址、回环地址、链路本地地址和 Tailscale CGNAT 地址。普通订阅、文章、图片和 AI API 不直接连接内网地址。可选 RSSHub 服务仅为环境变量 `RSSHUB_INTERNAL_URL` 指定的精确源提供首次请求例外，不允许跳转到其他内网服务。
 - 正文图片通过认证的服务端图片接口获取并缓存，支持 JPEG、PNG、GIF、WebP、AVIF；仅允许文章中出现的公网图片，保留 DNS/重定向检查。缓存有效期 7 天，总量上限约 256 MB。图片源会看到 NAS 的出口 IP；API Key 不会发给图片源。登录、签名过期、强防盗链的图片仍可能无法获取，提供打开原图入口。
 - 内网 HTTP 访问时 `COOKIE_SECURE=false`。对外访问应经 HTTPS 反向代理并设为 `true`，代理须保留原 Host，避免被同源写入检查拒绝；不信任 `X-Forwarded-*`。
 - 改动 `ACCESS_TOKEN` 并重建容器会撤销此前 Cookie 和 API 访问凭据。API Token 与管理员口令权限相同。
@@ -187,7 +205,7 @@ python -m pytest -q
 
 运行环境为 Python 3.12+。前端为原生 JavaScript/CSS，无 npm 构建步骤，无远程字体和运行时 CDN 依赖。测试使用临时数据库和模拟翻译服务，不需要真实 API Key。
 
-已在 Windows Docker Desktop（WSL 2 / Linux amd64）实际构建启动，43 项测试通过；验证了少数派、阮一峰博客、Hacker News 的真实抓取、网页登录、搜索、收藏、中文网页全文提取，以及容器重启后的数据保留。GitHub Actions 也提供 Linux 上的测试、镜像构建和容器健康检查。图文翻译已通过真实 API 调用和浏览器显示验证；NAS 实机部署及 ARM 平台尚未验证。部分外站可能出现网络超时，抓取器会尝试多个已验证公网 IP。
+已在 Windows Docker Desktop（WSL 2 / Linux amd64）实际构建启动，51 项测试通过；验证了少数派、阮一峰博客、Hacker News 的真实抓取、网页登录、搜索、收藏、中文网页全文提取，以及容器重启后的数据保留。GitHub Actions 也提供 Linux 上的测试、镜像构建和容器健康检查。图文翻译已通过真实 API 调用和浏览器显示验证；NAS 实机部署及 ARM 平台尚未验证。部分外站可能出现网络超时，抓取器会尝试多个已验证公网 IP。
 
 ## 参考与许可
 

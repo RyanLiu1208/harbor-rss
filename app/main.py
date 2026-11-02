@@ -25,6 +25,7 @@ from .network import download
 from .content import (safe_html, plaintext, reader_html, entry_link, feed_body, discover_feed,
                       extract_body, substantial, build_translation, parse_translation, render_translation)
 from .images import image_urls, cached_image
+from .feed_sources import fetch_feed
 
 DATA = Path(os.environ.get('DATA_DIR', './data'))
 TOKEN = os.environ.get('ACCESS_TOKEN', '')
@@ -98,7 +99,7 @@ def refresh_one(fid):
     if not feed:
         return
     try:
-        raw, final_url, _ = download(feed['url'],headers={'Accept':'application/atom+xml, application/rss+xml, application/feed+json, application/xml, text/xml, text/html;q=0.5'})
+        raw, final_url, _ = fetch_feed(feed['url'],download)
         if not raw.lstrip().startswith(b'{') and not feedparser.parse(raw).version:
             discovered=discover_feed(raw,final_url)
             if discovered:raw,final_url,_=download(discovered)
@@ -136,7 +137,7 @@ def friendly_error(e):
     if isinstance(e, ValueError):
         return str(e)[:400]
     if hasattr(e, 'response') and e.response is not None:
-        if e.response.status_code==403:return '远端拒绝访问（HTTP 403）；请使用可访问的 RSSHub 实例或原站订阅，当前已有文章会保留'
+        if e.response.status_code==403:return '原站拒绝访问（HTTP 403）；可能需要登录、授权或该站不支持自动订阅。已有文章已保留，可在原站查看'
         if e.response.status_code==404:return '订阅或文章地址不存在（HTTP 404）；请检查链接或 RSSHub 路由，可在订阅管理中编辑地址'
         return f'远端服务返回 HTTP {e.response.status_code}'
     return f'请求失败（{type(e).__name__}），请检查网络与配置'
@@ -523,7 +524,7 @@ class SettingsInput(BaseModel):
 @app.get('/api/settings')
 def get_settings():
     cfg = config()
-    return {**{k: v for k, v in cfg.items() if k != 'api_key'}, 'has_key': bool(cfg['api_key'])}
+    return {**{k: v for k, v in cfg.items() if k != 'api_key'}, 'has_key': bool(cfg['api_key']), 'rsshub_enabled':bool(os.getenv('RSSHUB_BASE_URL'))}
 
 @app.put('/api/settings')
 def update_settings(body: SettingsInput):

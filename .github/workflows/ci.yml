@@ -12,6 +12,8 @@ jobs:
           python-version: '3.12'
       - run: pip install -r requirements.txt
       - run: python -m pytest -q
+      - name: Validate optional RSSHub compose
+        run: ACCESS_TOKEN=ci-only-random-token-at-least-32-characters docker compose -f compose.yaml -f compose.rsshub.yaml config --quiet
       - run: docker build -t harbor-rss:ci .
       - name: Container smoke test
         run: |
