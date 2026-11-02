@@ -1,0 +1,24 @@
+name: Test and Docker build
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: python -m pytest -q
+      - run: docker build -t harbor-rss:ci .
+      - name: Container smoke test
+        run: |
+          docker run -d --name harbor -p 8080:8080 -e ACCESS_TOKEN=ci-only-random-token-at-least-32-characters harbor-rss:ci
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/health; then exit 0; fi
+            sleep 2
+          done
+          docker logs harbor
+          exit 1

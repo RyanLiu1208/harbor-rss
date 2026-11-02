@@ -1,0 +1,10 @@
+fastapi==0.121.0
+uvicorn==0.38.0
+httpx==0.28.1
+feedparser==6.0.12
+beautifulsoup4==4.14.2
+readability-lxml==0.8.4.1
+bleach==6.3.0
+defusedxml==0.7.1
+cryptography==46.0.3
+pytest==8.4.2

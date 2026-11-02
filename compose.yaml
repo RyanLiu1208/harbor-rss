@@ -1,0 +1,33 @@
+services:
+  harbor-rss:
+    build: .
+    image: harbor-rss:local
+    container_name: harbor-rss
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      ACCESS_TOKEN: ${ACCESS_TOKEN:?请在 .env 设置至少24位随机访问口令}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      AI_BASE_URL: ${AI_BASE_URL:-https://api.deepseek.com}
+      AI_MODEL: ${AI_MODEL:-deepseek-flash}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      REFRESH_SECONDS: ${REFRESH_SECONDS:-900}
+      DATA_DIR: /data
+    volumes:
+      - harbor-data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    mem_limit: 768m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+volumes:
+  harbor-data:
