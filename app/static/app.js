@@ -2,7 +2,7 @@
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const state = {feeds: [], items: [], view: 'all', feed: null, folder: null, q: '', article: null, job: null, mode: 'original', listRequest: 0, articleRequest: 0};
+const state = {feeds: [], items: [], view: 'all', feed: null, folder: null, q: '', article: null, job: null, mode: 'original', listRequest: 0, articleRequest: 0, editingFeed: null};
 let toastTimer, searchTimer, pollTimer;
 function toast(message) { $('#toast').textContent = message; $('#toast').classList.remove('hidden'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').classList.add('hidden'), 5000); }
 async function api(path, options = {}) {
@@ -20,6 +20,7 @@ async function start() {
 async function loadFeeds() {
   state.feeds = await api('/feeds');
   $('#unread-count').textContent = state.feeds.reduce((n,f) => n + f.unread, 0) || '';
+  const selected=state.feeds.find(f=>f.id===state.feed); $('#feed-notice').textContent=selected?.error || ''; $('#feed-notice').classList.toggle('hidden',!selected?.error);
   const groups = new Map();
   state.feeds.forEach(f => { if (!groups.has(f.folder)) groups.set(f.folder, []); groups.get(f.folder).push(f); });
   $('#feeds').innerHTML = state.feeds.length ? [...groups].map(([folder, feeds]) => `${folder ? `<div class="folder-label">⌄ ${esc(folder)}</div>` : ''}${feeds.map(f => `<button class="feed-row ${state.feed === f.id ? 'active' : ''}" data-feed="${f.id}" title="${esc(f.error || f.url)}"><span class="feed-avatar">${esc((f.title || '订').slice(0,1))}</span><span class="feed-name">${esc(f.title || f.url)}</span><small class="${f.error ? 'feed-error' : ''}">${f.error ? '!' : f.unread || ''}</small></button>`).join('')}`).join('') : '<div class="empty-list">还没有订阅<br>导入你的阅读世界 ↓</div>';
@@ -30,7 +31,7 @@ async function selectView(view, feed = null) {
   $('#view-title').textContent = feed ? state.feeds.find(f => f.id === feed)?.title || '订阅文章' : {all:'全部文章',unread:'未读文章',starred:'我的收藏'}[view];
   $$('#views button').forEach(b => b.classList.toggle('active', !feed && b.dataset.view === view));
   $$('#feeds [data-feed]').forEach(b => b.classList.toggle('active', Number(b.dataset.feed) === feed));
-  await loadArticles();
+  await loadFeeds(); await loadArticles();
 }
 async function loadArticles(append = false) {
   const req = ++state.listRequest;
@@ -55,12 +56,18 @@ async function openArticle(id) {
   $('#app').classList.add('reading'); $('#reader-empty').classList.add('hidden'); $('#reader-body').classList.remove('hidden');
   $('#article-title').textContent = a.title; $('#article-meta').textContent = a.feed_title;
   $('#article-byline').textContent = `${a.author ? a.author + ' · ' : ''}${new Date(a.published * 1000).toLocaleString('zh-CN')} · ${Math.max(1, Math.ceil((a.full_content || a.content).length / 1000))} 分钟阅读`;
-  $('#original').href = a.url; $('#content').innerHTML = a.full_content || a.content || '<p>订阅没有提供正文，请点击“抓取全文”或打开原文。</p>';
+  if (a.url) $('#original').href=a.url; else $('#original').removeAttribute('href'); $('#content').innerHTML = a.full_content || a.content || '<p>订阅没有提供正文，请点击“抓取全文”或打开原文。</p>';
+  $('#article-notice').classList.add('hidden');
   $('#translation').textContent = ''; $('#translation-status').classList.add('hidden'); $('#reading-tabs').classList.add('hidden');
   $('#star').textContent = a.starred ? '★' : '☆'; updateMode(); $('#reader-body').scrollTop = 0;
   await api('/articles/' + id, {method:'PATCH',body:JSON.stringify({read:true})});
   const local = state.items.find(a => a.id === id); if (local) local.read = 1; renderList(); await loadFeeds();
   if (state.article?.id === id && a.translation_job) { state.job = a.translation_job; pollJob(a.translation_job, id); }
+  if (!a.full_content && (new DOMParser().parseFromString(a.content,'text/html').body.textContent || '').length<600) {
+    $('#article-notice').textContent='正在获取原网页图文正文…'; $('#article-notice').classList.remove('hidden');
+    try { const data=await post('/articles/'+id+'/extract'); if(state.article?.id!==id)return; if(data.source==='web')a.full_content=data.content; $('#content').innerHTML=data.content; $('#article-notice').textContent=data.warning || ''; $('#article-notice').classList.toggle('hidden',!data.warning); }
+    catch(e) { if(state.article?.id===id) $('#article-notice').textContent='原网页未能提取：'+e.message+'。仍可阅读或翻译订阅中已有的内容。'; }
+  }
 }
 function updateMode() {
   $('#content').classList.toggle('hidden', state.mode === 'translation');
@@ -74,7 +81,10 @@ async function pollJob(jid, aid) {
     if (state.article?.id !== aid || state.job !== jid) return;
     $('#translation-status').classList.remove('hidden');
     $('#translation-status').textContent = {queued:'翻译任务已排队，可继续阅读其他文章。',running:`正在翻译全文 · ${job.completed} / ${job.total} 段`,done:`翻译完成 · ${job.total} 段 · ${job.language}`,failed:`翻译未完成：${job.error}（已保存 ${job.completed} 段）`}[job.status];
-    $('#translation').textContent = job.translation;
+    if (job.translation_html) { $('#translation').innerHTML=job.translation_html; $('#translation').classList.add('rich'); } else { $('#translation').textContent=job.translation; $('#translation').classList.remove('rich'); }
+    if (job.format==='html' && ['queued','running','failed'].includes(job.status)) $('#translation-status').textContent+=' · 未完成的段落暂时显示原文';
+    if (job.source_warning) $('#translation-status').textContent+=' · '+job.source_warning;
+    if (job.format==='text' && job.status==='done') $('#translation-status').textContent+=' · 这是旧版纯文本译文，点击「重新翻译」可保留图文。';
     if (job.translation) $('#reading-tabs').classList.remove('hidden');
     if (job.status === 'done') { state.mode = 'translation'; updateMode(); }
     if (job.status === 'failed') {
@@ -97,21 +107,23 @@ function changeTab(tab) {
   if (tab === 'manage') renderManage();
 }
 function renderManage() {
-  $('#manage-feeds').innerHTML = state.feeds.map(f => `<div class="manage-row"><div><strong>${esc(f.title || f.url)}</strong><small>${esc(f.url)}</small>${f.error ? `<small class="feed-error">${esc(f.error)}</small>` : ''}</div><button data-delete="${f.id}">删除</button></div>`).join('') || '<p>还没有订阅</p>';
+  $('#manage-feeds').innerHTML = state.feeds.map(f => `<div class="manage-row"><div><strong>${esc(f.title || f.url)}</strong><small>${esc(f.url)}</small>${f.error ? `<small class="feed-error">${esc(f.error)}</small>` : ''}</div><button data-edit="${f.id}">编辑</button><button data-retry="${f.id}">重试</button><button data-delete="${f.id}">删除</button></div>`).join('') || '<p>还没有订阅</p>';
+  $$('[data-edit]').forEach(b=>b.onclick=()=> { const f=state.feeds.find(f=>f.id===Number(b.dataset.edit)); state.editingFeed=f.id; $('#add-dialog h2').textContent='编辑订阅地址'; ['url','title','folder'].forEach(k=>$('#add-form').elements[k].value=f[k]); $('#add-dialog').showModal(); });
+  $$('[data-retry]').forEach(b=>b.onclick=async()=>{try{await post('/feeds/'+b.dataset.retry+'/refresh');toast('正在重新抓取该订阅');}catch(e){toast(e.message);}});
   $$('[data-delete]').forEach(b => b.onclick = async () => {
     if (!confirm('确定删除这个订阅及其文章、收藏和译文？')) return;
     try { await api('/feeds/' + b.dataset.delete,{method:'DELETE'}); await loadFeeds(); renderManage(); await selectView('all'); } catch(e) { toast(e.message); }
   });
 }
 $('#login-form').onsubmit = async e => { e.preventDefault(); try { await post('/login',{token:$('#token').value}); $('#token').value = ''; $('#login-error').textContent = ''; await start(); } catch(e) { $('#login-error').textContent = e.message; } };
-$('#add').onclick = () => $('#add-dialog').showModal();
+$('#add').onclick = () => { state.editingFeed=null; $('#add-form').reset(); $('#add-dialog h2').textContent='添加一份好内容'; $('#add-dialog').showModal(); };
 $$('[data-close]').forEach(b => b.onclick = () => b.closest('dialog').close());
 $$('#views button').forEach(b => b.onclick = () => selectView(b.dataset.view).catch(e => toast(e.message)));
 $('#settings').onclick = () => settings().catch(e => toast(e.message));
 ['#empty-import','#import-short'].forEach(s => $(s).onclick = () => settings('migration').catch(e => toast(e.message)));
 $$('.settings-tabs button').forEach(b => b.onclick = () => changeTab(b.dataset.tab));
 $$('#reading-tabs button').forEach(b => b.onclick = () => { state.mode = b.dataset.mode; updateMode(); });
-$('#add-form').onsubmit = async e => { e.preventDefault(); const b = e.submitter; b.disabled = true; try { const data = Object.fromEntries(new FormData(e.target)); await post('/feeds',data); $('#add-dialog').close(); e.target.reset(); await loadFeeds(); toast('订阅已添加，正在后台获取文章'); setTimeout(() => loadArticles().catch(()=>{}),3000); } catch(e) { toast(e.message); } finally { b.disabled = false; } };
+$('#add-form').onsubmit = async e => { e.preventDefault(); const b = e.submitter; b.disabled = true; try { const data = Object.fromEntries(new FormData(e.target)); if(state.editingFeed) await api('/feeds/'+state.editingFeed,{method:'PATCH',body:JSON.stringify(data)}); else await post('/feeds',data); if(state.editingFeed) await post('/feeds/'+state.editingFeed+'/refresh'); $('#add-dialog').close(); e.target.reset(); await loadFeeds(); toast('订阅已添加，正在后台获取文章'); setTimeout(() => loadArticles().catch(()=>{}),3000); } catch(e) { toast(e.message); } finally { b.disabled = false; } };
 $('#ai-form').onsubmit = async e => { e.preventDefault(); try { await api('/settings',{method:'PUT',body:JSON.stringify(Object.fromEntries(new FormData(e.target)))}); e.target.elements.api_key.value = ''; $('#key-state').textContent = '✓ 设置已保存'; toast('翻译设置已保存'); } catch(e) { toast(e.message); } };
 $('#import-file').onchange = async e => { const file = e.target.files[0]; if (!file) return; if (file.size > 4 * 1024 * 1024) return toast('文件不能超过 4 MB'); $('#import-text').value = await file.text(); };
 $('#import-submit').onclick = async () => { const b = $('#import-submit'); b.disabled = true; try { const result = await post('/import',{content:$('#import-text').value}); $('#import-result').textContent = `已导入 ${result.imported} 个订阅，跳过 ${result.duplicates} 个重复地址。文章将在后台抓取。`; await loadFeeds(); setTimeout(() => loadArticles().catch(()=>{}),3000); } catch(e) { toast(e.message); } finally { b.disabled = false; } };
@@ -120,14 +132,14 @@ $('#more').onclick = () => loadArticles(true).catch(e => toast(e.message));
 $('#search').oninput = e => { state.q = e.target.value; clearTimeout(searchTimer); searchTimer = setTimeout(() => loadArticles().catch(e=>toast(e.message)),250); };
 $('#back').onclick = () => $('#app').classList.remove('reading');
 $('#star').onclick = async () => { if (!state.article) return; const a = state.article; try { await api('/articles/' + a.id,{method:'PATCH',body:JSON.stringify({starred:!a.starred})}); a.starred = !a.starred; $('#star').textContent = a.starred ? '★' : '☆'; await loadArticles(); } catch(e) { toast(e.message); } };
-$('#extract').onclick = async () => { if (!state.article) return toast('请先选择文章'); const a = state.article, b = $('#extract'); b.disabled = true; b.textContent = '正在提取…'; try { const data = await post('/articles/' + a.id + '/extract'); if (state.article?.id === a.id) { a.full_content = data.content; $('#content').innerHTML = data.content; state.mode = 'original'; updateMode(); } toast('已提取正文，现在可以翻译全文'); } catch(e) { toast(e.message); } finally { b.disabled = false; b.textContent = '抓取全文'; } };
-$('#translate').onclick = async () => {
+$('#extract').onclick = async () => { if (!state.article) return toast('请先选择文章'); const a = state.article, b = $('#extract'); b.disabled = true; b.textContent = '正在提取…'; try { const data = await post('/articles/' + a.id + '/extract'); if (state.article?.id === a.id) { if(data.source==='web') a.full_content=data.content; $('#content').innerHTML=data.content; $('#article-notice').textContent=data.warning || ''; $('#article-notice').classList.toggle('hidden',!data.warning); state.mode = 'original'; updateMode(); } toast(data.warning || '已提取图文正文，现在可以翻译全文'); } catch(e) { toast(e.message); } finally { b.disabled = false; b.textContent = '抓取全文'; } };
+async function beginTranslation(force=false,useFeed=false) {
   if (!state.article) return toast('请先选择文章');
   const a = state.article, button = $('#translate'); button.disabled = true; button.textContent = '正在准备全文…';
   try {
     const cfg = await api('/settings');
     if (!cfg.has_key) { await settings(); return toast('请填写 DeepSeek 或兼容服务的 API Key'); }
-    const result = await post('/articles/' + a.id + '/translate',{language:cfg.language});
+    const result = await post('/articles/' + a.id + '/translate',{language:cfg.language,force,use_feed_content:useFeed});
     if (state.article?.id !== a.id) return;
     const updated = await api('/articles/' + a.id);
     if (state.article?.id !== a.id) return;
@@ -135,7 +147,11 @@ $('#translate').onclick = async () => {
     clearTimeout(pollTimer); state.job = result.job_id; pollJob(result.job_id,a.id);
   } catch(e) { toast(e.message); }
   finally { button.disabled = false; button.textContent = '✧ 全文翻译'; }
-};
+}
+$('#translate').onclick=()=>beginTranslation();
+$('#translate-feed').onclick=()=>beginTranslation(false,true);
+$('#retranslate').onclick=()=>beginTranslation(true);
+document.addEventListener('error',event=>{const img=event.target;if(img?.tagName!=='IMG'||!img.closest('.prose')||img.dataset.failed)return;img.dataset.failed='true';const original=new URL(img.src,location.href).searchParams.get('url');if(!original||!/^https?:/.test(original))return;const link=document.createElement('a');link.href=original;link.target='_blank';link.rel='noopener noreferrer';link.className='image-fallback';link.textContent='图片加载失败 · 打开原图';img.after(link);},true);
 $('#logout').onclick = async () => { try { await post('/logout'); location.reload(); } catch(e) { toast(e.message); } };
 setInterval(() => { if (!document.hidden && !$('#app').classList.contains('hidden') && !document.querySelector('dialog[open]')) { loadFeeds().catch(()=>{}); loadArticles().catch(()=>{}); } },30000);
 start();

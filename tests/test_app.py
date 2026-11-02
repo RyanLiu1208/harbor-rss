@@ -48,6 +48,10 @@ def test_private_network_blocked(monkeypatch, ip):
     monkeypatch.setattr(socket, 'getaddrinfo', lambda *a, **k: [(2,1,6,'',(ip,80))])
     with pytest.raises(ValueError): public_target('https://example.com')
 
+def fake_translation(segments,prefix='译文'):
+    output=json.dumps({'translations':[{'id':s['id'],'text':prefix+s['text']} for s in segments]},ensure_ascii=False)
+    return json.dumps({'choices':[{'finish_reason':'stop','message':{'content':output}}]}).encode()
+
 def insert_article(text='<p>Hello, world.</p>'):
     with m.db() as db:
         db.execute("INSERT INTO feeds(url,title) VALUES('https://example.com/rss','Example')")
@@ -72,8 +76,8 @@ def test_translation_all_chunks_cached_and_encrypted(client, monkeypatch):
     def mock_api(url, **kw):
         assert url == 'https://api.deepseek.com/chat/completions'
         assert kw['headers']['Authorization'] == 'Bearer test-key-not-real'
-        text = kw['json']['messages'][-1]['content']; sent.append(text)
-        return json.dumps({'choices':[{'finish_reason':'stop','message':{'content':'译文'+text}}]}).encode(), url, 'application/json'
+        segments=json.loads(kw['json']['messages'][-1]['content'])['segments']; sent.extend(s['text'] for s in segments)
+        return fake_translation(segments, '译文'), url, 'application/json'
     monkeypatch.setattr(m, 'download', mock_api)
     jid = client.post('/api/articles/1/translate',json={'use_feed_content':True}).json()['job_id']
     m.translate_job(jid)
@@ -91,13 +95,13 @@ def test_retry_continues_from_checkpoint(client, monkeypatch):
     def mocked(url, **kwargs):
         calls.append(kwargs['json']['messages'][-1]['content'])
         if len(calls) > 1: raise ValueError('simulated failure')
-        return b'{"choices":[{"finish_reason":"stop","message":{"content":"first"}}]}',url,''
+        return fake_translation(json.loads(kwargs['json']['messages'][-1]['content'])['segments'],'first'),url,''
     monkeypatch.setattr(m,'download',mocked)
     monkeypatch.setattr(m.stop,'wait',lambda *a: False)
     m.translate_job(jid)
     assert client.get('/api/jobs/'+jid).json()['completed'] == 1
     assert client.get('/api/jobs/'+jid).json()['status'] == 'failed'
-    monkeypatch.setattr(m,'download',lambda url,**kw: (b'{"choices":[{"finish_reason":"stop","message":{"content":"next"}}]}',url,''))
+    monkeypatch.setattr(m,'download',lambda url,**kw: (fake_translation(json.loads(kw['json']['messages'][-1]['content'])['segments'],'next'),url,''))
     assert client.post('/api/jobs/'+jid+'/retry').status_code == 200
     m.translate_job(jid)
     result = client.get('/api/jobs/'+jid).json()

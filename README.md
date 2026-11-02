@@ -9,7 +9,7 @@
 - 桌面三栏阅读与手机阅读布局；搜索、未读状态、收藏、订阅文件夹。
 - RSS 2.0、Atom、JSON Feed；支持 RSSHub 输出的公开订阅 URL。
 - OPML / JSON / CSV / TXT 订阅导入，去重及 OPML 导出；嵌套文件夹往返保留。
-- 后台定时抓取，单源失败不影响其他订阅；订阅管理显示抓取错误。
+- 后台定时抓取，单源失败不影响其他订阅；订阅管理显示抓取错误、支持单源重试及地址编辑；支持网页中声明的 RSS / Atom 订阅自动发现。
 - Readability 网页正文提取，清理不可信 HTML。
 - 全文翻译：默认先提取网页正文，逐段翻译，不主动截断源文本，不生成摘要。
 - 翻译队列、进度、已完成段落持久化、失败续传、重启恢复及结果缓存。
@@ -105,11 +105,11 @@ TXT：每行一个完整 HTTP/HTTPS URL，空行和 `#` 开头的注释忽略。
 
 `deepseek-flash` 来自当前 DeepSeek 官方模型文档；可按服务提供方的可用模型手动修改。DeepSeek 请求默认关闭思考模式以适合翻译。其他兼容服务不会收到此专用参数。基础地址填到 `/v1` 等 API 前缀为止，**不要填写 `/chat/completions`**，程序会自动追加该路径。
 
-选择文章，点击「全文翻译」。如果还没有提取正文，会先尝试抓取原网页全文；提取失败则报错，不会悄悄把摘要当全文。翻译对象是抓取器提取出的正文，无法保证包含评论、嵌入式媒体或网站登录后的内容。
+选择文章，点击「全文翻译」。如果还没有提取正文，会先尝试抓取原网页全文；提取失败时，若订阅已有较完整正文会明确提示后回退；只有摘要时保留摘要并说明失败原因，可选择「翻译已有正文」。翻译对象是抓取器提取出的正文，无法保证包含评论、嵌入式媒体或网站登录后的内容。
 
-每段最多 5000 字符，逐段保存结果；遇到请求异常自动重试最多 3 次。模型返回非 `stop` 结束状态会被视为不完整译文，任务失败后可继续重试；此前成功的段落不会再次调用 API。进程退出可能发生在服务商已经计费、但本地尚未保存该段结果之间，这种情况下恢复会重复该段调用。
+每组正文文字最多约 4500 字符，逐段保存结果；遇到请求异常自动重试最多 3 次。模型返回非 `stop` 结束状态会被视为不完整译文，任务失败后可继续重试；此前成功的段落不会再次调用 API。进程退出可能发生在服务商已经计费、但本地尚未保存该段结果之间，这种情况下恢复会重复该段调用。
 
-全文内容、语言、模型、API 基础地址相同且已有成功任务时复用缓存。原始排版中的表格、图片、链接样式不会完整保留到纯文本译文；代码与 URL 交给模型按提示保留。原文仍可随时查看。AI 译文质量和内容完整性应按需要核对。
+全文内容、语言、模型、API 基础地址相同且已有成功任务时复用缓存。译文保留段落、标题、列表、表格、图片和链接。代码块、行内代码不会发给模型，保持原样；仅翻译正文及图片说明文字，模型返回的内容始终按纯文本插回排版，不执行模型 HTML。旧版纯文本译文仍可查看，点击「重新翻译」会新建保留图文的任务。原文仍可随时查看。AI 译文质量和内容完整性应按需要核对。
 
 翻译只在点击按钮或调用接口后发生，会把文章正文发送至你填写的服务地址并产生该服务的 API 费用。没有预置 Key，不会使用 Folo 的 AI 账户。
 
@@ -142,6 +142,8 @@ curl "$HARBOR_URL/api/jobs/返回的job_id" \
 | `POST /api/logout` | 清除当前 Cookie |
 | `GET /api/feeds` | 订阅、文件夹、未读计数与错误 |
 | `POST /api/feeds` | `{ "url": "...", "title": "可选", "folder": "可选" }` |
+| `PATCH /api/feeds/{id}` | 编辑订阅 URL、名称和文件夹，保留已有文章 |
+| `POST /api/feeds/{id}/refresh` | 单独重试订阅抓取 |
 | `DELETE /api/feeds/{id}` | 删除订阅及文章、翻译任务 |
 | `POST /api/import` | `{ "content": "OPML/JSON/CSV/TXT 字符串" }` |
 | `GET /api/export` | OPML 下载 |
@@ -149,9 +151,10 @@ curl "$HARBOR_URL/api/jobs/返回的job_id" \
 | `GET /api/articles` | `feed_id, folder, view=all/unread/starred, q, offset, limit` |
 | `GET /api/articles/{id}` | 正文、提取后的全文和最近翻译任务 ID |
 | `PATCH /api/articles/{id}` | `{ "read": true, "starred": true }`，两个字段均可省略 |
+| `GET /api/articles/{id}/image?url=...` | 仅代理当前文章的图片，认证、缓存、SSRF 检查 |
 | `POST /api/articles/{id}/extract` | 抓取并缓存网页正文 |
 | `POST /api/articles/{id}/translate` | `{ "language": "简体中文", "force": false, "use_feed_content": false }` |
-| `GET /api/jobs/{id}` | `queued/running/done/failed`、进度及译文 |
+| `GET /api/jobs/{id}` | `queued/running/done/failed`、进度、纯文本译文及 `translation_html` 图文译文 |
 | `POST /api/jobs/{id}/retry` | 继续失败任务的剩余段落 |
 | `GET /api/settings` | 获取配置；仅返回是否存在 Key，不返回 Key |
 | `PUT /api/settings` | `base_url, model, language, api_key`；Key 留空保留 |
@@ -166,7 +169,7 @@ curl "$HARBOR_URL/api/jobs/返回的job_id" \
 - 每个源每次最多处理最近 500 篇文章；JSON Feed 条目的日期暂按首次抓取时间保存。没有自动删除旧文章，长期使用应检查数据卷空间。
 - 翻译同时执行一个任务，队列最多 100 个待处理任务；串行抓取，海量订阅首次同步会较慢。
 - 不访问私有地址、回环地址、链路本地地址和 Tailscale CGNAT 地址。自建内网 RSSHub/API 不能直接连接；需要使用可访问的公网 HTTPS 服务。本版本不提供放开内网限制的开关。
-- 浏览器中正文图片可直接访问原站图片，可能暴露读者 IP；API Key 只在服务端使用。
+- 正文图片通过认证的服务端图片接口获取并缓存，支持 JPEG、PNG、GIF、WebP、AVIF；仅允许文章中出现的公网图片，保留 DNS/重定向检查。缓存有效期 7 天，总量上限约 256 MB。图片源会看到 NAS 的出口 IP；API Key 不会发给图片源。登录、签名过期、强防盗链的图片仍可能无法获取，提供打开原图入口。
 - 内网 HTTP 访问时 `COOKIE_SECURE=false`。对外访问应经 HTTPS 反向代理并设为 `true`，代理须保留原 Host，避免被同源写入检查拒绝；不信任 `X-Forwarded-*`。
 - 改动 `ACCESS_TOKEN` 并重建容器会撤销此前 Cookie 和 API 访问凭据。API Token 与管理员口令权限相同。
 - 不支持外部 HTTP 代理环境变量；网络请求固定至验证后的公网 IP，TLS 仍按原始域名验证证书。
@@ -184,7 +187,7 @@ python -m pytest -q
 
 运行环境为 Python 3.12+。前端为原生 JavaScript/CSS，无 npm 构建步骤，无远程字体和运行时 CDN 依赖。测试使用临时数据库和模拟翻译服务，不需要真实 API Key。
 
-已在 Windows Docker Desktop（WSL 2 / Linux amd64）实际构建启动，30 项测试通过；验证了少数派、阮一峰博客、Hacker News 的真实抓取、网页登录、搜索、收藏、中文网页全文提取，以及容器重启后的数据保留。GitHub Actions 也提供 Linux 上的测试、镜像构建和容器健康检查。真实 DeepSeek 计费调用、NAS 实机部署及 ARM 平台尚未验证。部分外站可能出现网络超时，抓取器会尝试多个已验证公网 IP。
+已在 Windows Docker Desktop（WSL 2 / Linux amd64）实际构建启动，43 项测试通过；验证了少数派、阮一峰博客、Hacker News 的真实抓取、网页登录、搜索、收藏、中文网页全文提取，以及容器重启后的数据保留。GitHub Actions 也提供 Linux 上的测试、镜像构建和容器健康检查。图文翻译已通过真实 API 调用和浏览器显示验证；NAS 实机部署及 ARM 平台尚未验证。部分外站可能出现网络超时，抓取器会尝试多个已验证公网 IP。
 
 ## 参考与许可
 
