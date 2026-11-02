@@ -184,7 +184,7 @@ python -m pytest -q
 
 运行环境为 Python 3.12+。前端为原生 JavaScript/CSS，无 npm 构建步骤，无远程字体和运行时 CDN 依赖。测试使用临时数据库和模拟翻译服务，不需要真实 API Key。
 
-本地已验证 Python 后端测试、JS 语法和真实公网 RSS 抓取。真实 DeepSeek 计费调用尚未验证；Windows 开发环境没有 Docker，镜像构建与容器健康检查由 `.github/workflows/ci.yml` 提供，需查看 GitHub Actions 的实际结果。浏览器自动化不可用时不将视觉测试列为已通过。
+本地已验证 Python 后端测试、JS 语法和真实公网 RSS 抓取；部分外站后续连接存在网络超时，抓取器会尝试多个已验证公网 IP。首轮 GitHub Actions 已通过 Linux 上的测试、Docker 镜像构建和容器健康检查，后续提交结果见仓库 Actions。真实 DeepSeek 计费调用、NAS 实机部署及 ARM 平台尚未验证；浏览器自动化中断，未完成视觉与浏览器交互验证。
 
 ## 参考与许可
 

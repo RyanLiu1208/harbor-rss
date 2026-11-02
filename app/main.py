@@ -190,6 +190,8 @@ def translate_job(job_id):
             cfg = config()
             if not cfg['api_key']:
                 raise ValueError('请先在设置中填写 API Key')
+            if cfg['base_url'].rstrip('/') != row['base_url'].rstrip('/'):
+                raise ValueError('API 地址已变更；请为当前服务重新创建翻译任务，避免把新 Key 发给旧服务')
             chunks, results = json.loads(row['chunks']), json.loads(row['results'])
             for chunk in chunks[len(results):]:
                 if stop.is_set():

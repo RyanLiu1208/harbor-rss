@@ -3,10 +3,11 @@ import socket
 import threading
 from pathlib import Path
 import pytest
+import httpx
 from fastapi.testclient import TestClient
 from app import main as m
 from app.importers import parse_import
-from app.network import public_target
+from app.network import public_target, download
 REAL_REFRESH_ONE = m.refresh_one
 
 @pytest.fixture
@@ -157,3 +158,51 @@ def test_restart_recovers_running_job(client, monkeypatch):
     with m.db() as db: db.execute("UPDATE jobs SET status='running' WHERE id=?",(jid,))
     m.init_db()
     assert client.get('/api/jobs/'+jid).json()['status']=='queued'
+
+def mock_transport(monkeypatch, handler):
+    original = httpx.Client
+    monkeypatch.setattr(httpx,'Client',lambda **kwargs: original(transport=httpx.MockTransport(handler),**kwargs))
+
+def test_download_pins_dns_and_retries_unreachable_ip(monkeypatch):
+    monkeypatch.setattr(socket,'getaddrinfo',lambda *a,**kw: [(2,1,6,'',('93.184.216.34',443)),(2,1,6,'',('8.8.8.8',443))])
+    seen=[]
+    def handler(request):
+        seen.append(request.url.host)
+        assert request.headers['host']=='example.com'
+        assert request.extensions['sni_hostname']=='example.com'
+        if len(seen)==1: raise httpx.ConnectError('unreachable',request=request)
+        return httpx.Response(200,content=b'feed')
+    mock_transport(monkeypatch,handler)
+    assert download('https://example.com/rss')[0]==b'feed'
+    assert seen==['93.184.216.34','8.8.8.8']
+
+def test_download_redirect_to_private_blocked(monkeypatch):
+    monkeypatch.setattr(socket,'getaddrinfo',lambda host,*a,**kw: [(2,1,6,'',('127.0.0.1' if host=='localhost' else '93.184.216.34',443))])
+    mock_transport(monkeypatch,lambda request: httpx.Response(302,headers={'Location':'https://localhost/secret'}))
+    with pytest.raises(ValueError,match='禁止访问'): download('https://example.com/rss')
+
+def test_download_size_bound(monkeypatch):
+    monkeypatch.setattr(socket,'getaddrinfo',lambda *a,**kw: [(2,1,6,'',('93.184.216.34',443))])
+    mock_transport(monkeypatch,lambda request: httpx.Response(200,content=b'x'*100))
+    with pytest.raises(ValueError,match='大小限制'): download('https://example.com/rss',limit=10)
+
+def test_api_redirect_never_forwards_key(monkeypatch):
+    monkeypatch.setattr(socket,'getaddrinfo',lambda *a,**kw: [(2,1,6,'',('93.184.216.34',443))])
+    calls=[]
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(307,headers={'Location':'https://other.example/key'})
+    mock_transport(monkeypatch,handler)
+    with pytest.raises(ValueError,match='不允许重定向'): download('https://example.com/chat/completions',method='POST',headers={'Authorization':'Bearer fake-key'},json={})
+    assert len(calls)==1
+
+def test_changed_provider_never_receives_new_key(client, monkeypatch):
+    insert_article()
+    monkeypatch.setenv('DEEPSEEK_API_KEY','fake-key')
+    jid=client.post('/api/articles/1/translate',json={'use_feed_content':True}).json()['job_id']
+    client.put('/api/settings',json={'base_url':'https://new-provider.example/v1','model':'other','api_key':'new-fake-key'})
+    def forbidden(*args,**kw): raise AssertionError('No API request should be made')
+    monkeypatch.setattr(m,'download',forbidden)
+    m.translate_job(jid)
+    result=client.get('/api/jobs/'+jid).json()
+    assert result['status']=='failed' and 'API 地址已变更' in result['error']
