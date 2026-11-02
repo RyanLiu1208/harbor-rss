@@ -184,7 +184,7 @@ python -m pytest -q
 
 运行环境为 Python 3.12+。前端为原生 JavaScript/CSS，无 npm 构建步骤，无远程字体和运行时 CDN 依赖。测试使用临时数据库和模拟翻译服务，不需要真实 API Key。
 
-本地已验证 Python 后端测试、JS 语法和真实公网 RSS 抓取；部分外站后续连接存在网络超时，抓取器会尝试多个已验证公网 IP。首轮 GitHub Actions 已通过 Linux 上的测试、Docker 镜像构建和容器健康检查，后续提交结果见仓库 Actions。真实 DeepSeek 计费调用、NAS 实机部署及 ARM 平台尚未验证；浏览器自动化中断，未完成视觉与浏览器交互验证。
+已在 Windows Docker Desktop（WSL 2 / Linux amd64）实际构建启动，30 项测试通过；验证了少数派、阮一峰博客、Hacker News 的真实抓取、网页登录、搜索、收藏、中文网页全文提取，以及容器重启后的数据保留。GitHub Actions 也提供 Linux 上的测试、镜像构建和容器健康检查。真实 DeepSeek 计费调用、NAS 实机部署及 ARM 平台尚未验证。部分外站可能出现网络超时，抓取器会尝试多个已验证公网 IP。
 
 ## 参考与许可
 

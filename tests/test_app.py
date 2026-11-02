@@ -206,3 +206,19 @@ def test_changed_provider_never_receives_new_key(client, monkeypatch):
     m.translate_job(jid)
     result=client.get('/api/jobs/'+jid).json()
     assert result['status']=='failed' and 'API 地址已变更' in result['error']
+
+@pytest.mark.parametrize('encoding',['utf-8','gb18030'])
+def test_extract_decodes_real_html_bytes(client, monkeypatch, encoding):
+    insert_article('<p>Only excerpt.</p>')
+    paragraph='这是一篇完整的中文文章，用来验证网页正文的编码转换与提取。' * 20
+    source=f'<html><head><meta charset="{encoding}"><title>中文测试</title></head><body><article><h1>中文测试</h1><p>{paragraph}</p><p>{paragraph}正文结尾。</p></article><script>alert(1)</script></body></html>'
+    monkeypatch.setattr(m,'download',lambda url,**kw:(source.encode(encoding),url,'text/html'))
+    result=client.post('/api/articles/1/extract')
+    assert result.status_code==200, result.text
+    assert '正文结尾' in result.json()['content']
+    assert '<script' not in result.json()['content']
+    assert '正文结尾' in client.get('/api/articles/1').json()['full_content']
+    monkeypatch.setenv('DEEPSEEK_API_KEY','fake-key')
+    def no_fetch(*a,**kw): raise AssertionError('Cached full text should be used')
+    monkeypatch.setattr(m,'download',no_fetch)
+    assert client.post('/api/articles/1/translate',json={}).status_code==202

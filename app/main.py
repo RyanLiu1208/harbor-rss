@@ -15,7 +15,7 @@ from xml.etree import ElementTree as ET
 
 import bleach
 import feedparser
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, UnicodeDammit
 from cryptography.fernet import Fernet
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
@@ -424,7 +424,8 @@ def extract_article(aid: int):
     a = article(aid)
     try:
         raw, url, _ = download(a['url'])
-        html = safe_html(Document(raw).summary(), url)
+        decoded = UnicodeDammit(raw, is_html=True).unicode_markup or raw.decode('utf-8', errors='replace')
+        html = safe_html(Document(decoded).summary(), url)
         if len(plaintext(html)) < 80:
             raise ValueError('未能提取正文；网站可能需要登录或使用动态加载')
         with db() as c:
